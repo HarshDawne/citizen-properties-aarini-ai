@@ -1,8 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { GoogleGenAI, Chat, GenerateContentResponse } from "@google/genai";
 import { Message } from '../types';
 import { SYSTEM_INSTRUCTION } from '../constants';
-import { MessageSquare, Minimize2, Send, ChevronRight, Bot, AlertCircle } from 'lucide-react';
+import { MessageSquare, Minimize2, Send, ChevronRight, Bot } from 'lucide-react';
 
 // --- CONFIGURATION ---
 const RATE_LIMIT_WINDOW_MS = 60000; // 1 Minute window
@@ -149,48 +148,21 @@ const AariniChatbot: React.FC = () => {
       id: 'welcome',
       role: 'model',
       text: "Hi! I'm **Aarini**. How can I help you find your dream home in Mumbai or Thane today?\n\n<SUGGESTIONS>\n[\"Show listings in Bandra\", \"Budget 1 BHKs?\", \"Rentals under ₹50k\"]\n</SUGGESTIONS>",
-      timestamp: new Date()
-    }
+      timestamp: new Date(),
+    },
   ]);
+
   const [inputText, setInputText] = useState('');
-  
-  // isTyping = Input locked (Generating total)
-  // isWaitingForResponse = Waiting for first token (Show visual loader)
   const [isTyping, setIsTyping] = useState(false);
   const [isWaitingForResponse, setIsWaitingForResponse] = useState(false);
-  
+
   // Rate Limiting Ref (Timestamps of user requests)
   const requestHistoryRef = useRef<number[]>([]);
-  
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const chatSessionRef = useRef<Chat | null>(null);
 
-  // Initialize Chat Logic
-  useEffect(() => {
-    try {
-      const apiKey = process.env.REACT_APP_GEMINI_API_KEY;
-      if (apiKey) {
-        const ai = new GoogleGenAI({ apiKey });
-        chatSessionRef.current = ai.chats.create({
-          // Optimized model for low latency
-          model: 'gemini-2.5-flash',
-          config: {
-            systemInstruction: SYSTEM_INSTRUCTION,
-          },
-        });
-      } else {
-        console.warn("REACT_APP_GEMINI_API_KEY is missing. Please set it in .env.local");
-      }
-    } catch (error) {
-      console.error("Failed to initialize Gemini chat:", error);
-    }
-  }, []);
-
-  // Optimized Auto-scroll
+  // Auto-scroll
   useEffect(() => {
     if (messagesEndRef.current) {
-      // Use 'auto' (instant) scroll during active typing/streaming to prevent visual lag
-      // Use 'smooth' scroll for initial opens or manual user messages
       const behavior = isTyping ? 'auto' : 'smooth';
       messagesEndRef.current.scrollIntoView({ behavior });
     }
@@ -201,19 +173,15 @@ const AariniChatbot: React.FC = () => {
 
     // --- RATE LIMIT CHECK ---
     const now = Date.now();
-    // Filter timestamps that are within the active window (last 60s)
-    requestHistoryRef.current = requestHistoryRef.current.filter(time => now - time < RATE_LIMIT_WINDOW_MS);
-    
+    requestHistoryRef.current = requestHistoryRef.current.filter((time) => now - time < RATE_LIMIT_WINDOW_MS);
     if (requestHistoryRef.current.length >= RATE_LIMIT_MAX_REQUESTS) {
-       // Display local warning message without calling API
-       const waitSeconds = Math.ceil((RATE_LIMIT_WINDOW_MS - (now - requestHistoryRef.current[0])) / 1000);
-       
-       setMessages((prev) => [
+      const waitSeconds = Math.ceil((RATE_LIMIT_WINDOW_MS - (now - requestHistoryRef.current[0])) / 1000);
+      setMessages((prev) => [
         ...prev,
         {
           id: Date.now().toString(),
           role: 'user',
-          text: text,
+          text,
           timestamp: new Date(),
         },
         {
@@ -221,97 +189,55 @@ const AariniChatbot: React.FC = () => {
           role: 'model',
           text: `⚠️ **Rate Limit Alert**\n\nTo ensure quality service, we limit rapid messages. Please wait about **${waitSeconds} seconds** before asking again.`,
           timestamp: new Date(),
-        }
+        },
       ]);
       setInputText('');
       return;
     }
-    
+
     // Log valid request
     requestHistoryRef.current.push(now);
-    // --- END RATE LIMIT CHECK ---
 
     const userMsg: Message = {
       id: Date.now().toString(),
       role: 'user',
-      text: text,
+      text,
       timestamp: new Date(),
     };
 
-    setMessages((prev) => [...prev, userMsg]);
+    const modelMsgId = (Date.now() + 1).toString();
+
+    // Append user and placeholder model message
+    setMessages((prev) => [...prev, userMsg, { id: modelMsgId, role: 'model', text: '', timestamp: new Date() }]);
     setInputText('');
     setIsTyping(true);
-    setIsWaitingForResponse(true); // Start showing loader
+    setIsWaitingForResponse(true);
 
     try {
-      const result = await chatSessionRef.current.sendMessageStream({
-        message: text,
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: text }),
       });
 
-      const responseMsgId = (Date.now() + 1).toString();
-      let fullResponseText = '';
-
-      // Initialize empty model message
-      setMessages((prev) => [
-        ...prev,
-        {
-          try {
-            // If a client-side chat session exists (local key available), use streaming
-            if (chatSessionRef.current) {
-              const result = await chatSessionRef.current.sendMessageStream({
-                message: text,
-              });
-
-              const responseMsgId = (Date.now() + 1).toString();
-              let fullResponseText = '';
-
-              // Initialize empty model message
-              setMessages((prev) => [
-                ...prev,
-                {
-                  id: responseMsgId,
-                  role: 'model',
-                  text: '',
-                  timestamp: new Date(),
-                },
-              ]);
-
-              for await (const chunk of result) {
-                const chunkText = (chunk as GenerateContentResponse).text;
-                if (chunkText) {
-                  // Hide loader as soon as we get the first chunk of data
-                  setIsWaitingForResponse(false);
-
-                  fullResponseText += chunkText;
-                  setMessages((prev) =>
-                    prev.map((msg) =>
-                      msg.id === responseMsgId
-                        ? { ...msg, text: fullResponseText }
-                        : msg
-                    )
-                  );
-                }
-              }
-            } else {
-              // No client API key available in the browser -> call serverless proxy
-              const response = await fetch('/api/chat', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ message: text }),
-              });
-
-              const json = await response.json();
-              const responseText = json?.text ?? json?.error ?? 'No response';
-
-              const responseMsgId = (Date.now() + 1).toString();
-              setMessages((prev) =>
-                prev.map((msg) =>
-                  msg.id === responseMsgId
-                    ? { ...msg, text: responseText }
-                    : msg
-                )
-              );
-            }
+      if (!res.ok) {
+        let err = 'Server error';
+        try {
+          const j = await res.json();
+          err = j.error || j.message || err;
+        } catch {
+          err = `Server error: ${res.status}`;
+        }
+        setMessages((prev) => prev.map((m) => (m.id === modelMsgId ? { ...m, text: err } : m)));
+      } else {
+        const json = await res.json();
+        const responseText = json?.text ?? json?.result ?? '';
+        setMessages((prev) => prev.map((m) => (m.id === modelMsgId ? { ...m, text: responseText } : m)));
+      }
+    } catch (error) {
+      setMessages((prev) => prev.map((m) => (m.id === modelMsgId ? { ...m, text: "Sorry, something went wrong while generating a response. Please try again." } : m)));
+      console.error('Chat request failed', error);
+    } finally {
       setIsTyping(false);
       setIsWaitingForResponse(false);
     }
@@ -319,7 +245,8 @@ const AariniChatbot: React.FC = () => {
 
   const handleFormSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-                text: "Sorry, something went wrong while generating a response. Please try again.",
+    if (!inputText.trim()) return;
+    handleSendMessage(inputText.trim());
   };
 
   return (
