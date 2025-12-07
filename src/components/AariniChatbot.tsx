@@ -197,7 +197,7 @@ const AariniChatbot: React.FC = () => {
   }, [messages, isOpen, isTyping]);
 
   const handleSendMessage = useCallback(async (text: string) => {
-    if (!text.trim() || !chatSessionRef.current) return;
+    if (!text.trim()) return;
 
     // --- RATE LIMIT CHECK ---
     const now = Date.now();
@@ -255,41 +255,63 @@ const AariniChatbot: React.FC = () => {
       setMessages((prev) => [
         ...prev,
         {
-          id: responseMsgId,
-          role: 'model',
-          text: '',
-          timestamp: new Date(),
-        },
-      ]);
+          try {
+            // If a client-side chat session exists (local key available), use streaming
+            if (chatSessionRef.current) {
+              const result = await chatSessionRef.current.sendMessageStream({
+                message: text,
+              });
 
-      for await (const chunk of result) {
-        const chunkText = (chunk as GenerateContentResponse).text;
-        if (chunkText) {
-          // Hide loader as soon as we get the first chunk of data
-          setIsWaitingForResponse(false);
-          
-          fullResponseText += chunkText;
-          setMessages((prev) =>
-            prev.map((msg) =>
-              msg.id === responseMsgId
-                ? { ...msg, text: fullResponseText }
-                : msg
-            )
-          );
-        }
-      }
-    } catch (error) {
-      console.error("Error sending message:", error);
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: Date.now().toString(),
-          role: 'model',
-          text: "I'm having trouble connecting to the server. Please check your internet connection.",
-          timestamp: new Date(),
-        },
-      ]);
-    } finally {
+              const responseMsgId = (Date.now() + 1).toString();
+              let fullResponseText = '';
+
+              // Initialize empty model message
+              setMessages((prev) => [
+                ...prev,
+                {
+                  id: responseMsgId,
+                  role: 'model',
+                  text: '',
+                  timestamp: new Date(),
+                },
+              ]);
+
+              for await (const chunk of result) {
+                const chunkText = (chunk as GenerateContentResponse).text;
+                if (chunkText) {
+                  // Hide loader as soon as we get the first chunk of data
+                  setIsWaitingForResponse(false);
+
+                  fullResponseText += chunkText;
+                  setMessages((prev) =>
+                    prev.map((msg) =>
+                      msg.id === responseMsgId
+                        ? { ...msg, text: fullResponseText }
+                        : msg
+                    )
+                  );
+                }
+              }
+            } else {
+              // No client API key available in the browser -> call serverless proxy
+              const response = await fetch('/api/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message: text }),
+              });
+
+              const json = await response.json();
+              const responseText = json?.text ?? json?.error ?? 'No response';
+
+              const responseMsgId = (Date.now() + 1).toString();
+              setMessages((prev) =>
+                prev.map((msg) =>
+                  msg.id === responseMsgId
+                    ? { ...msg, text: responseText }
+                    : msg
+                )
+              );
+            }
       setIsTyping(false);
       setIsWaitingForResponse(false);
     }
@@ -297,7 +319,7 @@ const AariniChatbot: React.FC = () => {
 
   const handleFormSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    handleSendMessage(inputText);
+                text: "Sorry, something went wrong while generating a response. Please try again.",
   };
 
   return (
